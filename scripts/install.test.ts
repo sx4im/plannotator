@@ -2804,6 +2804,45 @@ describe("is_release_tag (install.sh): only a plain vX.Y.Z tag", () => {
   });
 });
 
+describe("is_allowed_override_url (install.sh): the app's override rule (#3298)", () => {
+  const script = readScript("install.sh");
+  const fn = script.slice(script.indexOf("is_allowed_override_url() {"), script.indexOf("\n}\n", script.indexOf("is_allowed_override_url() {")) + 3);
+  const check = (url: string) =>
+    Bun.spawnSync(["bash", "-c", `${fn}\nis_allowed_override_url "$1"`, "bash", url], { env: { LC_ALL: "en_US.UTF-8", PATH: "/usr/bin:/bin" } }).exitCode === 0;
+
+  test("accepts https mirrors and loopback http (packages/shared/update-check.ts)", () => {
+    for (const u of [
+      "https://mirror.example/dl",
+      "https://mirror.example:8443/dl",
+      "https://mirror.example/dl/",
+      "http://127.0.0.1:9/x",
+      "http://127.0.0.1/x",
+      "http://localhost:9/x",
+      "http://localhost/x",
+      "http://[::1]:9/x",
+      "http://[::1]/x",
+    ]) expect(check(u)).toBe(true);
+  });
+
+  test("rejects everything else (and install.sh falls back to GitHub)", () => {
+    for (const u of [
+      "",
+      "mirror.example/dl",
+      "http://mirror.example/dl",
+      "http://evil.example/x",
+      "http://127.0.0.1.evil.com/x",
+      "http://127.1/x",
+      "http://localhost.evil.com/x",
+      "http://[::1",
+      "file:///etc/passwd",
+      "ftp://mirror.example/x",
+      "https://",
+      "https://u:p@mirror.example/",
+      "http://u:p@127.0.0.1/x",
+    ]) expect(check(u)).toBe(false);
+  });
+});
+
 describe("install.ps1 / install.cmd: the latest tag is strictly validated (#1994)", () => {
   test("install.ps1 checks the API tag and the redirect tag with one anchored, case-sensitive pattern", () => {
     const ps = readScript("install.ps1");

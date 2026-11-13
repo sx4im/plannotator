@@ -44,6 +44,41 @@ is_release_tag() {
     esac
 }
 
+# is_allowed_override_url <url>: the app's isAllowedOverrideUrl in shell
+# (packages/shared/update-check.ts): an https: URL anywhere, or an http:
+# URL on a loopback host; embedded credentials are never allowed. Anything
+# else is not honored and the caller falls back to GitHub.
+is_allowed_override_url() {
+    case "$1" in
+        https://*|http://*) ;;
+        *) return 1 ;;
+    esac
+    _aou_authority="${1#*://}"
+    _aou_authority="${_aou_authority%%/*}"
+    [ -n "$_aou_authority" ] || return 1
+    case "$_aou_authority" in
+        *@*) return 1 ;;
+    esac
+    case "$1" in
+        https://*) return 0 ;;
+    esac
+    # http: only on a loopback host.
+    case "$_aou_authority" in
+        \[*\]*)
+            _aou_host="${_aou_authority%%\]*}"
+            _aou_host="${_aou_host}]"
+            ;;
+        *)
+            _aou_host="${_aou_authority%%:*}"
+            ;;
+    esac
+    case "$_aou_host" in
+        localhost) return 0 ;;
+        \[::1\]) return 0 ;;
+    esac
+    printf '%s' "$_aou_host" | grep -Eq '^127\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'
+}
+
 VERSION="latest"
 # Tracks whether a version was explicitly set via --version or positional.
 # Used to reject mixing --version <tag> with a stray positional token,
@@ -845,7 +880,26 @@ if [ "$verify_attestation" -eq 1 ]; then
     fi
 fi
 
-binary_url="https://github.com/${REPO}/releases/download/${latest_tag}/${binary_name}"
+# PLANNOTATOR_RELEASE_DOWNLOAD_URL: where the binary and its .sha256 come
+# from (#3298). Same rule as the app's releaseDownloadUrl()
+# (packages/server/update-prepare.ts): an https: URL, or an http: URL on a
+# loopback host, is honored (trailing slashes stripped); anything else falls
+# back to GitHub, so a stale or hostile value in the environment can never
+# redirect the download. The pinned SHA-256 check still guards the file, so
+# a mirror can't swap in a different binary.
+release_download_base="https://github.com/${REPO}/releases/download"
+if [ -n "${PLANNOTATOR_RELEASE_DOWNLOAD_URL:-}" ]; then
+    _release_override="${PLANNOTATOR_RELEASE_DOWNLOAD_URL}"
+    while [ "$_release_override" != "${_release_override%/}" ]; do
+        _release_override="${_release_override%/}"
+    done
+    if is_allowed_override_url "$_release_override"; then
+        release_download_base="$_release_override"
+    fi
+    unset _release_override
+fi
+
+binary_url="${release_download_base}/${latest_tag}/${binary_name}"
 checksum_url="${binary_url}.sha256"
 
 mkdir -p "$INSTALL_DIR"

@@ -344,6 +344,45 @@ describe.skipIf(process.platform === "win32" || !REAL_CURL || !BASH)("install.sh
     expect(binaryCalls[0]).not.toContain("--retry");
     expect(binaryCalls[0]).toContain("--speed-limit 1 --speed-time 60");
   }, 30_000);
+
+  // PLANNOTATOR_RELEASE_DOWNLOAD_URL (#3298): the app already accepts this
+  // mirror knob (releaseDownloadUrl in packages/server/update-prepare.ts)
+  // and update-prepare uses it for the .sha256; install.sh must use it for
+  // the binary and its .sha256 too, with the same allowlist (https: anywhere,
+  // http: only on a loopback host, no embedded credentials).
+  const binaryName = `plannotator-${process.platform === "darwin" ? "darwin" : "linux"}-${process.arch === "arm64" ? "arm64" : "x64"}`;
+
+  test("PLANNOTATOR_RELEASE_DOWNLOAD_URL serves the binary and checksum from the mirror", async () => {
+    const server = await startReleaseServer([]);
+    const mirror = `${server.origin}/mirror/releases/download`;
+    const r = await runInstallSh(server, { PLANNOTATOR_RELEASE_DOWNLOAD_URL: `${mirror}/` });
+    expect(r.code).toBe(0);
+    expect(r.installed.equals(BINARY)).toBe(true);
+    // The trailing slash is stripped, so the mirror sees the same paths.
+    expect(server.attempts()).toEqual([{ path: `/mirror/releases/download/v99.9.9/${binaryName}`, range: null }]);
+    const downloadPaths = server.requests.map((q) => q.path).filter((p) => p.includes("/releases/download/"));
+    expect(downloadPaths).toContain(`/mirror/releases/download/v99.9.9/${binaryName}.sha256`);
+    expect(downloadPaths.every((p) => p.startsWith("/mirror/releases/download/"))).toBe(true);
+    const binaryCalls = r.curlCalls.filter((c) => c.includes("/releases/download/") && !c.endsWith(".sha256"));
+    expect(binaryCalls).toHaveLength(1);
+    expect(binaryCalls[0]).toContain(`${mirror}/v99.9.9/${binaryName}`);
+  }, 30_000);
+
+  test("a non-loopback http override is ignored: the download still comes from github.com", async () => {
+    const server = await startReleaseServer([]);
+    const r = await runInstallSh(server, { PLANNOTATOR_RELEASE_DOWNLOAD_URL: "http://mirror.example/dl" });
+    expect(r.code).toBe(0);
+    expect(r.installed.equals(BINARY)).toBe(true);
+    expect(server.attempts()).toEqual([{ path: `/backnotprop/plannotator/releases/download/v99.9.9/${binaryName}`, range: null }]);
+  }, 30_000);
+
+  test("an override with embedded credentials is ignored", async () => {
+    const server = await startReleaseServer([]);
+    const r = await runInstallSh(server, { PLANNOTATOR_RELEASE_DOWNLOAD_URL: "https://user:pass@mirror.example/dl" });
+    expect(r.code).toBe(0);
+    expect(r.installed.equals(BINARY)).toBe(true);
+    expect(server.attempts()).toEqual([{ path: `/backnotprop/plannotator/releases/download/v99.9.9/${binaryName}`, range: null }]);
+  }, 30_000);
 });
 
 // ---------------------------------------------------------------------------
