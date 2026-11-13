@@ -97,9 +97,8 @@ export interface InboxHostSession {
  * The agent session this process belongs to, from the environment it
  * inherited, or null. `PLANNOTATOR_SESSION_TAG` (`<host>:<session id>`, set by
  * the Claude Code mod in every process its session starts) comes first; then
- * `T3CODE_THREAD_ID`, which T3 Code sets for the Claude it runs (a UUID; a
- * thread T3 made through MCP, a delegated or a forked one has another form and
- * names no session); then
+ * `T3CODE_THREAD_ID`, which T3 Code sets for the Claude it runs (a UUID, or `mcp:` on one for a
+ * thread T3 made through MCP; a delegated or a forked one has another form and names no session); then
  * `PI_SESSION_ID`, which Pi sets on each bash tool call; then
  * `CODEX_THREAD_ID`, which Codex sets in the commands its shell runs; Qwen's;
  * last `DSH_SESSION_ID`, DeepSeek Harness's, only beside `DSH_SHELL=1` (its
@@ -383,7 +382,7 @@ export const INBOX_T3_ENTRY_REFUSAL = "This plannotator-inbox entry (plannotator
 
 /**
  * An entry added with `--t3` that runs outside a T3 Code thread: no
- * T3CODE_THREAD_ID holding a UUID. It reads nothing else (no settings, no
+ * T3CODE_THREAD_ID holding a thread id. It reads nothing else (no settings, no
  * Claude Code version), so an entry without the flag never changes.
  */
 export function inboxT3EntryIdle(t3Flag: boolean, env: Record<string, string | undefined>): boolean {

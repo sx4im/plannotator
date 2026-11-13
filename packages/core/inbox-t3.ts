@@ -17,8 +17,8 @@ export const INBOX_T3_NAME = "T3 Code";
 /** The variable T3 Code sets in every process an agent of the thread starts. */
 export const INBOX_T3_THREAD_ENV = "T3CODE_THREAD_ID";
 
-/** A T3 Code thread id: a UUID. */
-const T3_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+/** A T3 Code thread id: a UUID, or one T3 made through MCP (`mcp:` on a UUID). The full id is the thread: T3's MCP API takes it as given. */
+const T3_THREAD_ID = /^(?:mcp:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 export function isT3ThreadId(value: unknown): value is string {
   return typeof value === "string" && T3_THREAD_ID.test(value);
