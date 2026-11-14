@@ -18,6 +18,7 @@ import { createRoot, type Root } from 'react-dom/client';
 import { parseInboxQuestionBlocks } from '@plannotator/core/inbox-questions';
 import type { InboxMessageWire, InboxProject, InboxQuestion, InboxThread } from '@plannotator/core/inbox-types';
 import type { TaggableSession } from './api';
+import { setSessionLabels } from './sessionLabels';
 
 const hasDom = typeof document !== 'undefined';
 // Viewer pulls in web-highlighter, which reads `window` at module-eval time.
@@ -657,4 +658,26 @@ test.skipIf(!hasDom)('a phone, one agent: nothing new, as on a computer: no cont
   await send(el);
   expect(el.querySelector('[data-recipient-list]')).toBeNull();
   expect(replies().map((r) => r.path)).toEqual([`/api/inbox/messages/${M2}/reply`]);
+});
+
+test.skipIf(!hasDom)("a computer: the pill and its list show a session's title where it has one, the fallback name where it has none (#3329)", async () => {
+  const el = await render(threadOf(agentMessage(M1, CLAUDE, 41), agentMessage(M2, PI, 45)));
+  await write(el, 'Use the old totals.');
+  // No titles yet: the fallback names, as before.
+  expect(pillName(el)).toBe('Pi');
+  act(() => setSessionLabels({ ses_pi: 'Copy pass on the order summary', ses_claude: 'Invoice PDF fonts' }));
+  await settle();
+  expect(pillName(el)).toBe('Copy pass on the order summary');
+  await openList(el);
+  expect(rows(el)).toEqual([
+    ['Invoice PDF fonts', null],
+    ['Copy pass on the order summary', null],
+  ]);
+  await only(el, 'ses_claude');
+  expect(pillName(el)).toBe('Invoice PDF fonts');
+  // The choice still sends to the session, not the title: the reply answers Claude Code's own latest message alone.
+  await send(el);
+  expect(replies().map((r) => r.path)).toEqual([`/api/inbox/messages/${M1}/reply`]);
+  expect(replies()[0]!.body.to).toBeUndefined();
+  act(() => setSessionLabels({}));
 });

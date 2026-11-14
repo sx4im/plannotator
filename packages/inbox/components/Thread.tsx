@@ -6109,17 +6109,19 @@ export function ThreadPane({ inReviews = false, reviewView = null, onInReviews, 
     // A foot that does not scroll stays at 0 (the browser holds it there), and grows upward instead.
     if (foot && now !== was) foot.scrollTop += now - was;
   }, [draftAboveShows]);
+  // What the picker shows for a session: its title where it has one, else its fallback name.
+  const displayName = (session: string) => labelOf(sessionLabels, session) ?? rcptAgents.find((r) => r.session === session)?.label ?? session;
   const onlyRecipient = (row: RecipientRow) => {
     aimReply([row.session]);
     setRcptOpen(false);
-    announce(`This reply goes to ${row.label}.`);
+    announce(`This reply goes to ${displayName(row.session)}.`);
   };
   const toggleReplyRecipient = (row: RecipientRow) => {
     // The agents typed with `@` count toward the most one reply goes to.
     const base = rcptPicked ?? (rcptDefault ? [rcptDefault] : []);
     const next = toggleRecipient(base, row.session, RECIPIENTS_MAX - taggedIds.filter((id) => !base.includes(id)).length, rcptAlone);
     aimReply(next);
-    announce(`This reply goes to ${namesList(next.map((id) => rcptAgents.find((r) => r.session === id)?.label ?? id))}.`);
+    announce(`This reply goes to ${namesList(next.map(displayName))}.`);
   };
   // The one place the reply's recipient control splits: a phone's is in the box's row with its sheet (approval
   // "inbox-phone-composer-picker"), a computer's is the pill. Both show by the same rule (`pillActive`): a thread with
@@ -6138,7 +6140,7 @@ export function ThreadPane({ inReviews = false, reviewView = null, onInReviews, 
       folderOf={(session) => sessionFolder(session, thread, taggable) ?? thread.project.name}
     />
   ) : (
-    <ReplyRecipient rows={rcptAgents} chosen={rcptChosen} open={rcptOpen} onOpen={setRcptOpen} onOnly={onlyRecipient} onToggle={toggleReplyRecipient} onTagAnother={tagAnother} />
+    <ReplyRecipient rows={rcptAgents} chosen={rcptChosen} open={rcptOpen} onOpen={setRcptOpen} onOnly={onlyRecipient} onToggle={toggleReplyRecipient} onTagAnother={tagAnother} labels={sessionLabels} />
   );
   const routeChoice = asking ? (
     <RouteChoice
