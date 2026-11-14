@@ -18,7 +18,10 @@ export type RecipientState = 'live' | 'ended' | 'reader' | 'old';
 export interface RecipientRow {
   session: string;
   host: string | null;
-  /** The name in the pill and the list: "Claude Code (plannotator)", "Claude Code 2", "OpenCode". */
+  /**
+   * The name in the pill and the list: a live session label, where it has one ("Fix login redirect"), else the
+   * fallback name ("Claude Code (plannotator)", "Claude Code 2", "OpenCode").
+   */
   label: string;
   /** What a phone's pill shows: the folder alone when the label carries one ("plannotator"), else the label. */
   short: string;
@@ -87,11 +90,16 @@ export function recipientState(session: string, model: TaggableModel | null, end
   return found.taggable ? 'live' : 'old';
 }
 
-/** The pill's rows, named as the approval says, live first and ended last (each group in the order given). */
+/**
+ * The pill's rows, named as the approval says, live first and ended last (each group in the order given).
+ * A session's live label, where `labelOf` finds one, is the row's name, as the phone sheet shows it; without
+ * one the row keeps the fallback name. The label is display only: nothing routes or decides on it.
+ */
 export function recipientRows(
   people: readonly RecipientPerson[],
   folderOf: (session: string) => string | null,
   stateOf: (session: string) => RecipientState,
+  labelOf?: (session: string) => string | null,
 ): RecipientRow[] {
   const named = people.map((p) => ({ ...p, agent: agentName(p.host, p.name ?? null), folder: folderOf(p.session) }));
   const used = new Map<string, number>();
@@ -102,7 +110,7 @@ export function recipientRows(
     const base = folder ? `${p.agent} (${folder})` : p.agent;
     const n = (used.get(base) ?? 0) + 1;
     used.set(base, n);
-    const label = n > 1 ? `${base} ${n}` : base;
+    const label = labelOf?.(p.session) ?? (n > 1 ? `${base} ${n}` : base);
     return { session: p.session, host: p.host, label, short: folder ? (n > 1 ? `${folder} ${n}` : folder) : label, state: stateOf(p.session) };
   });
   return [...rows.filter((r) => r.state !== 'ended'), ...rows.filter((r) => r.state === 'ended')];

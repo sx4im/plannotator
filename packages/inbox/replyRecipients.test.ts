@@ -1,7 +1,8 @@
 /**
  * The recipient pill's names and order (approval "inbox-reply-recipient"): two
  * sessions of one agent in different folders are told apart by the folder,
- * two in one folder by a number, and ended agents come last. A wrong name here
+ * two in one folder by a number, and ended agents come last. A session with a
+ * live label is named by it, as the phone sheet shows it. A wrong name here
  * makes two Claude Codes look the same, and the reply goes to the wrong one.
  */
 import { expect, test } from 'bun:test';
@@ -24,6 +25,39 @@ test('two sessions in one folder: "Claude Code", then "Claude Code 2", in the or
   expect(rowsOf([{ host: 'claude-code', session: 'a' }, { host: 'claude-code', session: 'b' }], { a: 'superfans', b: 'superfans' })).toEqual([
     ['a', 'Claude Code', 'Claude Code', 'live'],
     ['b', 'Claude Code 2', 'Claude Code 2', 'live'],
+  ]);
+});
+
+test('a session with a live label is named by it; the others keep the fallback name, and the number still counts the labelled row', () => {
+  const labels: Record<string, string> = { a: 'Fix login redirect' };
+  const rows = recipientRows(
+    [
+      { host: 'pi', session: 'a' },
+      { host: 'pi', session: 'b' },
+    ],
+    () => 'superfans',
+    () => 'live',
+    (s) => labels[s] ?? null,
+  ).map((r) => [r.session, r.label, r.short, r.state]);
+  expect(rows).toEqual([
+    ['a', 'Fix login redirect', 'Fix login redirect', 'live'],
+    ['b', 'Pi 2', 'Pi 2', 'live'],
+  ]);
+});
+
+test('an ended session keeps its label, listed last', () => {
+  const rows = recipientRows(
+    [
+      { host: 'claude-code', session: 'gone' },
+      { host: 'pi', session: 'p' },
+    ],
+    () => 'plannotator',
+    (s) => (s === 'gone' ? 'ended' : 'live'),
+    (s) => (s === 'gone' ? 'Fix login redirect' : null),
+  ).map((r) => [r.session, r.label, r.short, r.state]);
+  expect(rows).toEqual([
+    ['p', 'Pi', 'Pi', 'live'],
+    ['gone', 'Fix login redirect', 'Fix login redirect', 'ended'],
   ]);
 });
 

@@ -2832,8 +2832,10 @@ export function ThreadPane({ inReviews = false, reviewView = null, onInReviews, 
       (session) =>
         sessionFolder(session, thread, taggable) ?? (rcptGone.has(session) || live?.sessions.some((s) => s.session === session) ? thread.project.name : null),
       (session) => recipientState(session, taggable, ended),
+      // A session's live label is the row's name, as the phone sheet shows it; without one the fallback name stays.
+      (session) => labelOf(sessionLabels, session),
     ).map((row) => ({ ...row, alone: canTakeAlone(row.state, row.session === rcptDefault || latestBy(thread, row.session) !== undefined) }));
-  }, [pillActive, participants, thread, askerEnded, asking, live, taggable, rcptGone, rcptDefault]);
+  }, [pillActive, participants, thread, askerEnded, asking, live, taggable, rcptGone, rcptDefault, sessionLabels]);
   /** Whether a session can be the first recipient (a typed tag's, not in the list, is live). */
   const rcptAlone = (id: string) => rcptAgents.find((r) => r.session === id)?.alone !== false;
   /** The choice came back with a draft (not the person's own tap): one led by an agent that can't take it alone is not kept. */
