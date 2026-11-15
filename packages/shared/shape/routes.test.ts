@@ -109,6 +109,15 @@ describe("shape routes", () => {
     }
   });
 
+  test("a malformed percent-encoded path is a 400, not a URIError", async () => {
+    const w = world();
+    for (const path of ["/api/shapes/%", `/api/shapes/${w.id}/files/%E0%A4%A`]) {
+      expect((await w.call("GET", path)).status).toBe(400);
+    }
+    expect((await w.call("GET", `/api/shapes/${w.id}`)).status).toBe(200);
+    expect(w.changed).toEqual([]);
+  });
+
   test("an SVG or AVIF picture the board keeps is served as its type", async () => {
     const w = world();
     const source = scratch();
