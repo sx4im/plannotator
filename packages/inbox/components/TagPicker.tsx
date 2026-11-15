@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from 'react';
 import type { MentionMenuState } from '@plannotator/ui/hooks/useMentionAutocomplete';
 import { inboxApi, type TaggableModel } from '../api';
+import { skillListRoom } from '../caretMenu';
 import type { RecipientConnection } from '../deliveryLine';
 
 /** How often an open reply box reads who can be tagged, so a session that started or stopped shows. */
@@ -73,37 +74,82 @@ import { TAG_READERS_GROUP, TAG_UPDATE_WORDS, tagHeadsUp, tagModeLine, type TagO
 import type { TagMode } from '../api';
 
 /**
+ * Where the `@` list sits: above the field, measured, never inside the
+ * field's own boxes. The field lives inside `.ib-rscroll`, whose `overflow:
+ * auto` cuts anything drawn above it, so the list drawn in place opened
+ * behind the scroll region's top edge and showed nothing; the pane's own
+ * `overflow: hidden` cuts what runs past its top too. A measured `fixed`
+ * placement escapes both (no ancestor takes `transform` or `filter`, so the
+ * viewport is the list's box): as wide as the field, above it, capped by the
+ * thread's header, so every row stays reachable by scrolling the list.
+ *
  * An iPhone with the keyboard up (`data-ib-keyboard-pin`): the thread's foot is a short box that scrolls, and the
  * picker drawn above the field opened behind the header, cut off (approval "inbox-reply-recipient", "fix with it").
  * There it is placed on the screen instead: as wide as the field, above it up to the header, never past it; with no
- * room above the field, over the box from its row (Send's) up. Elsewhere it keeps its place in the page.
+ * room above the field, over the box from its row (Send's) up. Without layout (a test DOM) it keeps its place in
+ * the page, as it always did there.
  */
-function useKeyboardSpot(): { ref: RefObject<HTMLDivElement | null>; style: CSSProperties | undefined } {
+function useMenuSpot(): { ref: RefObject<HTMLDivElement | null>; style: CSSProperties | undefined } {
   const ref = useRef<HTMLDivElement | null>(null);
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
-  // Every commit (the field grows as the person types); the equality guard converges.
-  useLayoutEffect(() => {
+  const measure = useCallback(() => {
     const menu = ref.current;
-    const foot = menu?.closest('.ib-pfoot');
     const field = menu?.parentElement?.getBoundingClientRect();
-    if (!menu || !foot || !field || !document.documentElement.hasAttribute('data-ib-keyboard-pin')) {
+    // No layout (a test DOM): the list keeps its place in the page, as it always did there.
+    if (!menu || !field || field.width === 0 || field.height === 0) {
       setStyle((current) => (current === undefined ? current : undefined));
       return;
     }
-    const headBottom = foot.closest('.ib-pane')?.querySelector('.ib-phead')?.getBoundingClientRect().bottom ?? 0;
-    // Room above the field: there. With the keyboard leaving ~257 px the field starts under the header, so the list
-    // covers the box instead, from just above the box's row (Send's) up to the header (as the recipient list does).
-    const above = Math.round(field.top - 10);
-    const row = foot.querySelector('[data-reply-row]')?.getBoundingClientRect();
-    const top = above - headBottom - 8 >= 120 || !row ? above : Math.round(row.top - 6);
+    const foot = menu.closest('.ib-pfoot');
+    const doc = menu.ownerDocument;
+    if (doc.documentElement.hasAttribute('data-ib-keyboard-pin') && foot) {
+      const headBottom = foot.closest('.ib-pane')?.querySelector('.ib-phead')?.getBoundingClientRect().bottom ?? 0;
+      // Room above the field: there. With the keyboard leaving ~257 px the field starts under the header, so the list
+      // covers the box instead, from just above the box's row (Send's) up to the header (as the recipient list does).
+      const above = Math.round(field.top - 10);
+      const row = foot.querySelector('[data-reply-row]')?.getBoundingClientRect();
+      const top = above - headBottom - 8 >= 120 || !row ? above : Math.round(row.top - 6);
+      const left = Math.round(field.left);
+      const room = Math.max(88, top - headBottom - 8);
+      setStyle((current) =>
+        current && current.top === top && current.left === left && current.maxHeight === room
+          ? current
+          : { position: 'fixed', top, left, width: Math.round(field.width), right: 'auto', bottom: 'auto', margin: 0, transform: 'translateY(-100%)', maxHeight: room },
+      );
+      return;
+    }
+    // The room above the field, under the thread's header (the visual viewport when there is no pane): the list
+    // hangs off the field's top edge, one whole row at least, never past the header.
+    const room = skillListRoom(menu);
+    const top = Math.round(field.top - 8);
     const left = Math.round(field.left);
-    const room = Math.max(88, top - headBottom - 8);
+    const width = Math.round(field.width);
+    const maxHeight = Math.max(88, Math.min(430, Math.round(top - room.top - 8)));
     setStyle((current) =>
-      current && current.top === top && current.left === left && current.maxHeight === room
+      current && current.top === top && current.left === left && current.width === width && current.maxHeight === maxHeight
         ? current
-        : { position: 'fixed', top, left, width: Math.round(field.width), right: 'auto', bottom: 'auto', margin: 0, transform: 'translateY(-100%)', maxHeight: room },
+        : { position: 'fixed', top, left, width, right: 'auto', bottom: 'auto', margin: 0, transform: 'translateY(-100%)', maxHeight },
     );
+  }, []);
+  // Every commit (the field grows as the person types); the equality guard converges.
+  useLayoutEffect(() => {
+    measure();
   });
+  // A scroll anywhere, a resize, the visual viewport (a phone's keyboard): the field moves without a commit.
+  useLayoutEffect(() => {
+    const view = ref.current?.ownerDocument.defaultView ?? window;
+    const onMove = () => measure();
+    view.addEventListener('resize', onMove);
+    view.addEventListener('scroll', onMove, true);
+    view.visualViewport?.addEventListener('resize', onMove);
+    view.visualViewport?.addEventListener('scroll', onMove);
+    return () => {
+      view.removeEventListener('resize', onMove);
+      view.removeEventListener('scroll', onMove, true);
+      view.visualViewport?.removeEventListener('resize', onMove);
+      view.visualViewport?.removeEventListener('scroll', onMove);
+    };
+  }, [measure]);
   return { ref, style };
 }
 
@@ -119,7 +165,7 @@ export function TagPicker({
   onSelect: (index: number) => void;
 }) {
   const byId = new Map(options.map((o) => [o.id, o]));
-  const spot = useKeyboardSpot();
+  const spot = useMenuSpot();
   return (
     <div ref={spot.ref} className="ib-tg-menu" data-tag-picker="" id={id} role="listbox" aria-label="Tag an agent" style={spot.style}>
       {menu.items.length === 0 ? (
