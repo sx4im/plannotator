@@ -14,11 +14,11 @@
  *
  * The rules are replyRecipients.ts; ThreadPane owns the choice and Send.
  */
-import { useEffect, useRef, type ReactNode } from 'react';
+import { useCallback, useEffect, useRef, type ReactNode } from 'react';
 import { HostMark, Icon } from '../icons';
 import { canAddRecipient, type RecipientRow } from '../replyRecipients';
 import { namesList } from '../tags';
-import { TagStack } from './TagPicker';
+import { TagStack, useMenuSpot } from './TagPicker';
 import { Tip } from './Tip';
 import { markRecipientList } from '../pageMarks';
 
@@ -65,6 +65,16 @@ export function ReplyRecipient({
   onTagAnother: () => void;
 }) {
   const listId = useRef(`ib-rpick-${Math.random().toString(36).slice(2)}`).current;
+  // The list hangs above the pill, fixed to the viewport like the `@` list: inside the reply row it would be cut
+  // by the same scrolling boxes that cut the tag menu (issue #3427).
+  const spot = useMenuSpot({ gap: 6, align: 'right', width: 300 });
+  const attachList = useCallback(
+    (el: HTMLDivElement | null) => {
+      spot.ref.current = el;
+      markRecipientList(el);
+    },
+    [spot.ref],
+  );
   const chosenIds = chosen.map((r) => r.session);
   const one = chosen.length === 1 ? chosen[0]! : null;
   const names = namesList(chosen.map((r) => r.label));
@@ -117,7 +127,7 @@ export function ReplyRecipient({
   );
 
   const list = open ? (
-    <div ref={markRecipientList} className="ib-tg-menu ib-rpick" id={listId} data-recipient-list="" role="group" aria-label="Who gets this reply" onMouseDown={(event) => event.preventDefault()}>
+    <div ref={attachList} className="ib-tg-menu ib-rpick" id={listId} data-recipient-list="" role="group" aria-label="Who gets this reply" style={spot.style} onMouseDown={(event) => event.preventDefault()}>
       {rows.map((row) => {
         const on = chosenIds.includes(row.session);
         const quiet = QUIET[row.state];

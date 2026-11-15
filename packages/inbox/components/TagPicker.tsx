@@ -73,35 +73,127 @@ import { TAG_READERS_GROUP, TAG_UPDATE_WORDS, tagHeadsUp, tagModeLine, type TagO
 import type { TagMode } from '../api';
 
 /**
- * An iPhone with the keyboard up (`data-ib-keyboard-pin`): the thread's foot is a short box that scrolls, and the
- * picker drawn above the field opened behind the header, cut off (approval "inbox-reply-recipient", "fix with it").
- * There it is placed on the screen instead: as wide as the field, above it up to the header, never past it; with no
- * room above the field, over the box from its row (Send's) up. Elsewhere it keeps its place in the page.
+ * Where the `@` picker sits, and the recipient list with it (it shares the
+ * picker's box): fixed to the viewport, above its anchor, never inside the
+ * field's own boxes.
+ *
+ * The menu used to hang off its wrapper (`position: absolute; bottom: 100%`),
+ * inside `.ib-rscroll`, whose `overflow-y: auto` clips anything past the
+ * scroll box's top edge — so in the reply box, and in the expanded composer,
+ * the whole list was cut off and nothing showed. The skills menu escapes the
+ * same trap by portaling out; this one stays where it is in the DOM (its
+ * aria links and focus behavior do not move) and is placed `fixed` instead,
+ * measured from its anchor on every commit and on anything that moves the
+ * anchor (a scroll anywhere, a resize, the visual viewport). An iPhone with
+ * the keyboard up (`data-ib-keyboard-pin`) keeps its own placement: as wide
+ * as the field, above it up to the header, never past it; with no room above
+ * the field, over the box from its row (Send's) up. With too little room
+ * above anywhere else, the list hangs below its anchor instead. A modal
+ * dialog is the one place the fixed spot does not apply: a dialog is the top
+ * layer, so a fixed menu inside it is placed against the dialog, not the
+ * viewport, and the coordinates below would be wrong — there the CSS
+ * `absolute` stands, as before. A DOM with no layout (tests) likewise keeps
+ * the CSS placement.
  */
-function useKeyboardSpot(): { ref: RefObject<HTMLDivElement | null>; style: CSSProperties | undefined } {
+export function useMenuSpot({ gap, align, width }: { gap: number; align: 'stretch' | 'right'; width?: number }): {
+  ref: RefObject<HTMLDivElement | null>;
+  style: CSSProperties | undefined;
+} {
   const ref = useRef<HTMLDivElement | null>(null);
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
-  // Every commit (the field grows as the person types); the equality guard converges.
+  const [tick, setTick] = useState(0);
+  // The menu follows its anchor while it is open: a scroll anywhere, a
+  // resize, or the visual viewport moving (a phone's keyboard) re-measures.
+  useEffect(() => {
+    const view = ref.current?.ownerDocument.defaultView ?? window;
+    const viewport = view.visualViewport;
+    const soon = () => setTick((n) => n + 1);
+    view.addEventListener('scroll', soon, true);
+    view.addEventListener('resize', soon);
+    viewport?.addEventListener('resize', soon);
+    viewport?.addEventListener('scroll', soon);
+    return () => {
+      view.removeEventListener('scroll', soon, true);
+      view.removeEventListener('resize', soon);
+      viewport?.removeEventListener('resize', soon);
+      viewport?.removeEventListener('scroll', soon);
+    };
+  }, []);
+  // Every commit (the field grows as the person types, the list filters as
+  // they type); the equality guard converges.
   useLayoutEffect(() => {
+    void tick;
     const menu = ref.current;
-    const foot = menu?.closest('.ib-pfoot');
-    const field = menu?.parentElement?.getBoundingClientRect();
-    if (!menu || !foot || !field || !document.documentElement.hasAttribute('data-ib-keyboard-pin')) {
+    const doc = menu?.ownerDocument;
+    if (!menu || !doc) {
       setStyle((current) => (current === undefined ? current : undefined));
       return;
     }
-    const headBottom = foot.closest('.ib-pane')?.querySelector('.ib-phead')?.getBoundingClientRect().bottom ?? 0;
-    // Room above the field: there. With the keyboard leaving ~257 px the field starts under the header, so the list
-    // covers the box instead, from just above the box's row (Send's) up to the header (as the recipient list does).
-    const above = Math.round(field.top - 10);
-    const row = foot.querySelector('[data-reply-row]')?.getBoundingClientRect();
-    const top = above - headBottom - 8 >= 120 || !row ? above : Math.round(row.top - 6);
-    const left = Math.round(field.left);
-    const room = Math.max(88, top - headBottom - 8);
+    if (menu.closest('dialog[open]')) {
+      setStyle((current) => (current === undefined ? current : undefined));
+      return;
+    }
+    const anchor = menu.parentElement?.getBoundingClientRect();
+    if (!anchor || (anchor.width === 0 && anchor.height === 0)) {
+      setStyle((current) => (current === undefined ? current : undefined));
+      return;
+    }
+    const foot = menu.closest('.ib-pfoot');
+    const headBottom = foot?.closest('.ib-pane')?.querySelector('.ib-phead')?.getBoundingClientRect().bottom ?? 0;
+    const view = doc.defaultView ?? window;
+    const vw = view.innerWidth;
+    const vh = view.innerHeight;
+    const left = align === 'stretch' ? Math.round(anchor.left) : Math.max(12, Math.round(anchor.right - Math.min(width ?? 300, vw - 24)));
+    const span = align === 'stretch' ? Math.round(anchor.width) : Math.min(width ?? 300, vw - 24);
+    if (doc.documentElement.hasAttribute('data-ib-keyboard-pin') && align === 'stretch') {
+      // Room above the field: there. With the keyboard leaving ~257 px the field starts under the header, so the list
+      // covers the box instead, from just above the box's row (Send's) up to the header (as the recipient list does).
+      const above = Math.round(anchor.top - 10);
+      const row = foot?.querySelector('[data-reply-row]')?.getBoundingClientRect();
+      const top = above - headBottom - 8 >= 120 || !row ? above : Math.round(row.top - 6);
+      const room = Math.max(88, top - headBottom - 8);
+      setStyle((current) =>
+        current && current.top === top && current.left === left && current.width === span && current.maxHeight === room
+          ? current
+          : { position: 'fixed', top, left, width: span, right: 'auto', bottom: 'auto', margin: 0, transform: 'translateY(-100%)', maxHeight: room },
+      );
+      return;
+    }
+    const roomAbove = anchor.top - headBottom - gap - 8;
+    const roomBelow = vh - anchor.bottom - gap - 8;
+    const above = roomAbove >= 120 || roomAbove >= roomBelow;
+    const next: CSSProperties = above
+      ? {
+          position: 'fixed',
+          top: Math.round(anchor.top - gap),
+          left,
+          width: span,
+          right: 'auto',
+          bottom: 'auto',
+          margin: 0,
+          transform: 'translateY(-100%)',
+          maxHeight: Math.max(88, Math.round(roomAbove)),
+        }
+      : {
+          position: 'fixed',
+          top: Math.round(anchor.bottom + gap),
+          left,
+          width: span,
+          right: 'auto',
+          bottom: 'auto',
+          margin: 0,
+          maxHeight: Math.max(88, Math.round(roomBelow)),
+        };
     setStyle((current) =>
-      current && current.top === top && current.left === left && current.maxHeight === room
+      current &&
+      current.position === next.position &&
+      current.top === next.top &&
+      current.left === next.left &&
+      current.width === next.width &&
+      current.maxHeight === next.maxHeight &&
+      current.transform === next.transform
         ? current
-        : { position: 'fixed', top, left, width: Math.round(field.width), right: 'auto', bottom: 'auto', margin: 0, transform: 'translateY(-100%)', maxHeight: room },
+        : next,
     );
   });
   return { ref, style };
@@ -119,7 +211,7 @@ export function TagPicker({
   onSelect: (index: number) => void;
 }) {
   const byId = new Map(options.map((o) => [o.id, o]));
-  const spot = useKeyboardSpot();
+  const spot = useMenuSpot({ gap: 8, align: 'stretch' });
   return (
     <div ref={spot.ref} className="ib-tg-menu" data-tag-picker="" id={id} role="listbox" aria-label="Tag an agent" style={spot.style}>
       {menu.items.length === 0 ? (
