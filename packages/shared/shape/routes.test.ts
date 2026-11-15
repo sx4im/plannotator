@@ -118,6 +118,15 @@ describe("shape routes", () => {
     const name = /files\/([^"]+)/.exec(w.store.read(w.id)!.views.picture!.html)![1]!;
     expect(await w.call("GET", `/api/shapes/${w.id}/files/${name}`)).toMatchObject({ status: 200, file: { contentType: "image/svg+xml" } });
   });
+
+  test("a malformed percent-encoded path is a 400, not a crash", async () => {
+    const w = world();
+    for (const path of ["/api/shapes/%", `/api/shapes/${w.id}/files/%E0%A4%A`]) {
+      expect((await w.call("GET", path)).status).toBe(400);
+    }
+    expect((await w.call("GET", `/api/shapes/${w.id}`)).status).toBe(200);
+    expect(w.changed).toEqual([]);
+  });
 });
 
 describe("the event feed's watch", () => {
