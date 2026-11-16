@@ -35,11 +35,23 @@
  * person used last delivers. A session start, a prompt the person submits
  * (`input` not from an extension) and a `plannotator_inbox` call touch the
  * session's lease in `InboxWake`; the other process defers while it is live.
+ *
+ * A handed-off session (#3539): when a session hands its work to a new one
+ * (`ctx.newSession({ parentSession })`), replies to the old session never
+ * arrive — the old session is gone, so the Inbox shows "Queued for Pi" and the
+ * person's answer is lost to the agent that now carries the work. So a session
+ * start also wakes the gone ancestors: it walks the `parentSession` chain in
+ * the session files' headers (nearest first, a few levels, stopping at the
+ * first ancestor a live Pi still claims — that process delivers its own replies
+ * and covers everything older) and starts one extra `InboxWake` per gone
+ * ancestor, into this session. The wakes share this file's single `waiting`
+ * slot, so their deliveries are serialized, one at a time.
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
+import { dirname, isAbsolute, join } from "node:path";
 import { loadConfig, resolveInboxReminder, resolveInboxReminderText, resolveInboxTool } from "./generated/config.ts";
 import { getPlannotatorDataDir } from "./generated/data-dir.ts";
 import {
@@ -49,7 +61,7 @@ import {
 	InboxWake,
 } from "./generated/inbox/agent-link.ts";
 import { inboxAgentTool, type InboxReplyCommand } from "./generated/inbox/connection.ts";
-import { releasePiSessionClaim, writePiSessionClaim } from "./generated/inbox/pi-session-claim.ts";
+import { readPiSessionClaims, releasePiSessionClaim, writePiSessionClaim } from "./generated/inbox/pi-session-claim.ts";
 import { isCtxAlive, resolveIdleDeliveryOptions } from "./current-pi-session.ts";
 import { loadedPackageVersion, packageUpdatedMessage, readPackageVersion } from "./package-version.ts";
 import { detectPiHost } from "./pi-host.ts";
@@ -261,6 +273,101 @@ export function exportPiSessionProject(env: Record<string, string | undefined>, 
 	}
 }
 
+/** How far back a handoff chain is followed for replies (the issue's "a few levels"). */
+const MAX_HANDOFF_ANCESTORS = 5;
+
+/** A Pi session file's header: the `type: "session"` entry, first in the file. */
+export interface PiSessionHeader {
+	id: string;
+	parentSession?: string;
+}
+
+/**
+ * One .jsonl line as a session header, or null (not a session entry, or
+ * unreadable). Exported for the tests.
+ */
+export function parseSessionHeaderLine(line: string): PiSessionHeader | null {
+	let value: unknown;
+	try {
+		value = JSON.parse(line);
+	} catch {
+		return null;
+	}
+	if (!value || typeof value !== "object") return null;
+	const entry = value as { type?: unknown; id?: unknown; parentSession?: unknown };
+	if (entry.type !== "session" || typeof entry.id !== "string" || !entry.id) return null;
+	const parentSession = typeof entry.parentSession === "string" && entry.parentSession ? entry.parentSession : undefined;
+	return parentSession === undefined ? { id: entry.id } : { id: entry.id, parentSession };
+}
+
+/**
+ * The header of the session file at `file` (its first non-empty line), or
+ * null (missing, unreadable, or no session entry there). Exported for the tests.
+ */
+export function readSessionHeaderFile(file: string): PiSessionHeader | null {
+	let text: string;
+	try {
+		text = readFileSync(file, "utf8");
+	} catch {
+		return null;
+	}
+	for (const line of text.split("\n")) {
+		if (!line.trim()) continue;
+		return parseSessionHeaderLine(line);
+	}
+	return null;
+}
+
+/**
+ * The ancestors of the session in `sessionFile` whose replies would otherwise
+ * be lost: nearest first, walking each file's `parentSession`, stopping at
+ * the first ancestor a live Pi still claims (its own process delivers its
+ * replies, and covers everything older). `isClaimed` answers whether a live
+ * Pi claims the session id; `readHeader` reads a session file's header.
+ * A cycle or a missing file ends the walk. Exported for the tests.
+ */
+export function findHandoffAncestors(
+	sessionFile: string,
+	isClaimed: (sessionId: string) => boolean,
+	readHeader: (file: string) => PiSessionHeader | null = readSessionHeaderFile,
+	maxLevels: number = MAX_HANDOFF_ANCESTORS,
+): string[] {
+	const ancestors: string[] = [];
+	const seen = new Set<string>([sessionFile]);
+	let file = sessionFile;
+	for (let level = 0; level < maxLevels; level++) {
+		const parent = readHeader(file)?.parentSession;
+		if (!parent) break;
+		const parentFile = isAbsolute(parent) ? parent : join(dirname(file), parent);
+		if (seen.has(parentFile)) break;
+		seen.add(parentFile);
+		const parentHeader = readHeader(parentFile);
+		if (!parentHeader) break;
+		if (isClaimed(parentHeader.id)) break;
+		ancestors.push(parentHeader.id);
+		file = parentFile;
+	}
+	return ancestors;
+}
+
+/**
+ * A one-at-a-time queue: each task starts only after the previous one
+ * settled, and a rejection never blocks the queue. The main wake and the
+ * ancestor wakes share the single `waiting` slot, so a second delivery has to
+ * wait for the first to settle (#3539). Exported for the tests.
+ */
+export function createDeliveryQueue(): <T>(task: () => Promise<T>) => Promise<T> {
+	let queue: Promise<void> = Promise.resolve();
+	return <T>(task: () => Promise<T>): Promise<T> => {
+		const run = queue.then(task);
+		queue = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		return run;
+	};
+}
+
 function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options: PiInboxOptions & { reminder: string | null }): void {
 	const spec = inboxAgentTool(connection.tools);
 	const ohMyPi = detectPiHost(pi) === "oh-my-pi";
@@ -283,6 +390,10 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 
 	let ctx: ExtensionContext | null = null;
 	let wake: InboxWake | null = null;
+	/** Extra wakes for gone ancestors of this session (#3539), delivering into this session. */
+	let ancestorWakes: InboxWake[] = [];
+	/** The session the ancestor wakes belong to; a new session starts a new lineage. */
+	let ancestorWakesFor: string | null = null;
 	/** The on-disk version the session was last told about (#2085's message, once per version). */
 	let notifiedOnDisk: string | null = null;
 	let activationSettled = false;
@@ -314,7 +425,7 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 	};
 
 	/** Put the wake text into the session and wait until Pi starts it as a user message. */
-	const send = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
+	const sendNow = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
 		new Promise<void>((resolve, reject) => {
 			const current = ctx;
 			const watchdog = () => {
@@ -337,6 +448,11 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 				endWaiting(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
+
+	/** One delivery at a time: the main wake and the ancestor wakes share the single `waiting` slot (#3539). */
+	const enqueueSend = createDeliveryQueue();
+	const send = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
+		enqueueSend(() => sendNow(text, command, deliverAs));
 
 	const target = {
 		// Never steer into this session's own "Ask this session" question (its answer streams to
@@ -405,6 +521,46 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 		if (event?.toolName === "bash") exportPiSessionProject(process.env, callCtx);
 	});
 
+	/**
+	 * The gone ancestors of this session's lineage (#3539): one extra wake per
+	 * ancestor, into this session. A new session drops the old lineage's
+	 * wakes; the same session keeps the ones it already has. Never throws:
+	 * a session that cannot be walked simply gets no extra wakes.
+	 */
+	const startAncestorWakes = (startCtx: ExtensionContext) => {
+		let sessionId: string;
+		let sessionFile: string | undefined;
+		try {
+			sessionId = startCtx.sessionManager.getSessionId();
+			sessionFile = startCtx.sessionManager.getSessionFile() ?? undefined;
+		} catch {
+			return;
+		}
+		if (ancestorWakesFor !== sessionId) {
+			for (const ancestorWake of ancestorWakes) ancestorWake.dispose();
+			ancestorWakes = [];
+			ancestorWakesFor = sessionId;
+		}
+		if (!sessionFile) return;
+		let ancestors: string[];
+		try {
+			const liveClaimed = new Set(
+				readPiSessionClaims(connection.dataDir)
+					.filter((claim) => claim.pid !== process.pid)
+					.map((claim) => claim.session),
+			);
+			ancestors = findHandoffAncestors(sessionFile, (id) => liveClaimed.has(id));
+		} catch {
+			return;
+		}
+		for (const ancestorId of ancestors) {
+			if (ancestorWakes.some((ancestorWake) => ancestorWake.sessionId === ancestorId)) continue;
+			const ancestorWake = new InboxWake(connection, ancestorId, target);
+			ancestorWake.start();
+			ancestorWakes.push(ancestorWake);
+		}
+	};
+
 	pi.on("session_start", (_event, startCtx: ExtensionContext) => {
 		ctx = startCtx;
 		if (!activationSettled) {
@@ -425,6 +581,7 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 			wake = new InboxWake(connection, sessionId, target);
 			wake.start();
 		}
+		if (startCtx.hasUI) startAncestorWakes(startCtx);
 	});
 
 	// The reminder (INBOX_REMINDER_TEXT): one hidden custom message on the
@@ -466,6 +623,9 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 	pi.on("session_shutdown", () => {
 		wake?.dispose();
 		wake = null;
+		for (const ancestorWake of ancestorWakes) ancestorWake.dispose();
+		ancestorWakes = [];
+		ancestorWakesFor = null;
 		ctx = null;
 		endWaiting(new Error("the session ended"));
 	});
@@ -473,7 +633,11 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 	// The person submitted something: their turn goes first, and replies follow them to this process.
 	pi.on("input", (event) => {
 		wake?.onForeignPrompt();
-		if (event?.source !== "extension") wake?.touch();
+		for (const ancestorWake of ancestorWakes) ancestorWake.onForeignPrompt();
+		if (event?.source !== "extension") {
+			wake?.touch();
+			for (const ancestorWake of ancestorWakes) ancestorWake.touch();
+		}
 	});
 	pi.on("agent_start", () => {
 		runOpen = true;
