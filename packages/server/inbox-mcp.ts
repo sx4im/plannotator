@@ -375,6 +375,21 @@ export interface InboxMcpContext extends InboxSnoozeMcpContext, InboxScheduledMc
    * Absent: on.
    */
   chapterDiagramsOn?: () => boolean;
+  /**
+   * The Inbox reminder (Prompts → Inbox) for an MCP agent session: the
+   * person's rules and reminder, composed exactly as a terminal session
+   * starts with it (resolveInboxReminderText) — the host's own texts when
+   * it set them, else the shared ones; null when the person turned the
+   * reminder off (configuredInboxReminder) or set neither text. Absent:
+   * MCP sessions get no reminder; the built-in instructions stand.
+   */
+  inboxReminder?: (host: string | undefined, wakes: boolean) => string | null;
+  /**
+   * The agent sessions an Inbox reminder already reached, once each. The
+   * set lives in the Inbox process: the server is stateless, a new one per
+   * request, so it cannot hold it. Absent: no reminder is delivered.
+   */
+  inboxReminderDelivered?: Set<string>;
 }
 
 
@@ -461,6 +476,36 @@ async function withTidy(context: InboxMcpContext, result: ToolResult, input: Rec
   if (last >= 0) content[last] = { ...content[last]!, text: `${content[last]!.text}${tidy}` };
   else content.push({ type: "text", text: tidy.trimStart() });
   return { ...result, content, ...(result.structuredContent ? { structuredContent: { ...result.structuredContent, tidy: { id: note.id, text: body } } } : {}) };
+}
+
+/**
+ * The Inbox reminder (Prompts → Inbox) for an MCP agent session, once, at
+ * the end of its next Inbox tool result: the MCP equivalent of the
+ * once-per-session-start reminder a terminal session gets
+ * (resolveInboxReminderText). A session whose own connection gives it the
+ * reminder instead (Claude Code's mod, Pi, OpenCode) gets a second copy
+ * here: that costs one block, once, and catches the sessions that only
+ * connect over MCP (T3 Code), which never see it otherwise. A connection's
+ * own list call (callerPeeks) never consumes the delivery: its result goes
+ * to the bridge, not the agent. Nothing when the person turned the
+ * reminder off or set neither text, and never on an error result.
+ */
+async function withInboxReminder(context: InboxMcpContext, result: ToolResult, input: Record<string, unknown>, ctx: unknown): Promise<ToolResult> {
+  const session = typeof input?.agent_session === "string" ? input.agent_session.trim() : "";
+  const delivered = context.inboxReminderDelivered;
+  if (!session || !delivered || !context.inboxReminder || result.isError || callerPeeks(ctx)) return result;
+  if (delivered.has(session)) return result;
+  const host = typeof input.agent_host === "string" && input.agent_host.trim() !== "" ? input.agent_host.trim() : undefined;
+  const wakes = await senderWakes(context, ctx, { agent_host: host, agent_session: session });
+  const text = context.inboxReminder(host, wakes);
+  if (!text) return result;
+  delivered.add(session);
+  const reminder = `\n\n${text}`;
+  const content = [...result.content];
+  const last = content.length - 1;
+  if (last >= 0) content[last] = { ...content[last]!, text: `${content[last]!.text}${reminder}` };
+  else content.push({ type: "text", text });
+  return { ...result, content };
 }
 
 /** The send tools' last sentence for a caller whose reply arrives by itself. */
@@ -1187,8 +1232,11 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
   );
   // Every tool's result carries a Tidy waiting on an agent no connection wakes (MCP only), once, at its end.
   const register = server.registerTool.bind(server) as (name: string, config: unknown, handler: (input: never, ctx: unknown) => Promise<ToolResult>) => unknown;
+  // Every tool result carries the Inbox reminder first (withInboxReminder),
+  // then a tidy wake note (withTidy): the reminder is session-start
+  // guidance, the tidy a pending reply.
   server.registerTool = ((name: string, config: unknown, handler: (input: Record<string, unknown>, ctx: unknown) => Promise<ToolResult>) =>
-    register(name, config, async (input: Record<string, unknown>, ctx: unknown) => withTidy(context, await handler(input, ctx), input, ctx))) as unknown as typeof server.registerTool;
+    register(name, config, async (input: Record<string, unknown>, ctx: unknown) => withTidy(context, await withInboxReminder(context, await handler(input, ctx), input, ctx), input, ctx))) as unknown as typeof server.registerTool;
 
   server.registerTool(
     "send_message",

@@ -132,6 +132,7 @@ import {
   inboxToolWith,
   configuredInboxReminder,
   resolveInboxReminder,
+  resolveInboxReminderText,
   type InboxToolHost,
   type PlannotatorConfig,
   type ThemeConfig,
@@ -1641,6 +1642,18 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     // A thread only a linked machine holds goes through the window's own forward (inbox-machines.ts).
     snoozeOnMachine: async (threadId, until) => (machines ? machines.snoozeThread(threadId, until) : null),
     snoozeMade: () => markSnoozeUsed(),
+    // The Inbox reminder (Prompts → Inbox) for an MCP agent session (#3555):
+    // the person's rules and reminder, once per session, at the end of its
+    // next tool result. An MCP host (T3 Code) is not an InboxToolHost, so
+    // the helpers fall back to the shared texts for it, and the switch
+    // reads the shared value the same way. The set lives in this process:
+    // the server is stateless, a new one per request.
+    inboxReminder: (host, wakes) => {
+      const config = loadConfig();
+      if (configuredInboxReminder(config, host as InboxToolHost) === false) return null;
+      return resolveInboxReminderText(config, host as InboxToolHost, { wakes });
+    },
+    inboxReminderDelivered: new Set<string>(),
     ...(options.mcpNow ? { now: options.mcpNow } : {}),
   };
   const mcp = createMcpHandler(() => createInboxMcpServer(mcpContext), { legacy: "stateless", maxRequestBodySize: INBOX_MAX_REQUEST_BYTES });
