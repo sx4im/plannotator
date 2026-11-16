@@ -39,7 +39,8 @@
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { closeSync, existsSync, openSync, readSync } from "node:fs";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { loadConfig, resolveInboxReminder, resolveInboxReminderText, resolveInboxTool } from "./generated/config.ts";
 import { getPlannotatorDataDir } from "./generated/data-dir.ts";
 import {
@@ -49,7 +50,7 @@ import {
 	InboxWake,
 } from "./generated/inbox/agent-link.ts";
 import { inboxAgentTool, type InboxReplyCommand } from "./generated/inbox/connection.ts";
-import { releasePiSessionClaim, writePiSessionClaim } from "./generated/inbox/pi-session-claim.ts";
+import { readPiSessionClaims, releasePiSessionClaim, writePiSessionClaim } from "./generated/inbox/pi-session-claim.ts";
 import { isCtxAlive, resolveIdleDeliveryOptions } from "./current-pi-session.ts";
 import { loadedPackageVersion, packageUpdatedMessage, readPackageVersion } from "./package-version.ts";
 import { detectPiHost } from "./pi-host.ts";
@@ -78,6 +79,109 @@ export const PI_INBOX_HOST = "pi";
 export const PI_INBOX_AGENT_NAME = "Pi";
 /** A wake that has not entered the session after this long, while the session is idle, did not reach it. */
 const DELIVERY_WATCHDOG_MS = 15_000;
+
+/** How far up a handed-off session's parentSession chain the Pi wake reaches (#3539). */
+const HANDOFF_ANCESTOR_LIMIT = 3;
+
+export type PiSessionHeader = { id?: string; parentSession?: string };
+
+/**
+ * A Pi session file's header (line 1 of its .jsonl): its `id` and the `parentSession` file it
+ * came from, if any. Best effort: null when the file cannot be read or its first line is not a
+ * header — a session the wake never reaches is one whose replies stay queued, not a crash.
+ * Exported for the tests.
+ */
+export function readPiSessionHeader(file: string): PiSessionHeader | null {
+	let text: string;
+	try {
+		const fd = openSync(file, "r");
+		try {
+			const buffer = Buffer.alloc(64 * 1024);
+			const read = readSync(fd, buffer, 0, buffer.length, 0);
+			text = buffer.subarray(0, read).toString("utf8");
+		} finally {
+			closeSync(fd);
+		}
+	} catch {
+		return null;
+	}
+	const line = text.split("\n", 1)[0] ?? "";
+	if (!line) return null;
+	try {
+		const value = JSON.parse(line) as { id?: unknown; parentSession?: unknown };
+		return {
+			...(typeof value.id === "string" && value.id ? { id: value.id } : {}),
+			...(typeof value.parentSession === "string" && value.parentSession ? { parentSession: value.parentSession } : {}),
+		};
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * The handed-off ancestors a Pi session should wake for (#3539): the sessions up its
+ * `parentSession` chain, nearest first, that no live Pi still claims in `inbox/pi-sessions/`
+ * (a predecessor still running keeps its own replies, so the walk stops at the first one a live
+ * Pi claims). The walk stops at the first unreadable file, the first header without an id, a
+ * loop, or the limit. This process's own claim is for the session starting now, which is about
+ * to be released, so it never counts as a live claim here. Exported for the tests.
+ */
+export function resolveHandoffAncestors(options: {
+	sessionId: string;
+	sessionFile?: string;
+	dataDir: string;
+	maxAncestors?: number;
+	readHeader?: (file: string) => PiSessionHeader | null;
+	readClaims?: (dataDir: string) => { session: string; pid: number }[];
+}): string[] {
+	const { sessionId, sessionFile, dataDir } = options;
+	if (!sessionFile) return [];
+	const readHeader = options.readHeader ?? readPiSessionHeader;
+	const readClaims = options.readClaims ?? readPiSessionClaims;
+	const limit = options.maxAncestors ?? HANDOFF_ANCESTOR_LIMIT;
+	let live: Set<string>;
+	try {
+		live = new Set(readClaims(dataDir).filter((claim) => claim.pid !== process.pid).map((claim) => claim.session));
+	} catch {
+		live = new Set();
+	}
+	const ancestors: string[] = [];
+	const seen = new Set<string>([sessionId]);
+	let file = sessionFile;
+	for (let hops = 0; hops < limit; hops++) {
+		let header: PiSessionHeader | null;
+		try {
+			header = readHeader(file);
+		} catch {
+			break;
+		}
+		const parent = header?.parentSession;
+		if (!parent) break;
+		const parentFile = isAbsolute(parent) ? parent : resolve(dirname(file), parent);
+		let parentHeader: PiSessionHeader | null;
+		try {
+			parentHeader = readHeader(parentFile);
+		} catch {
+			break;
+		}
+		const ancestorId = parentHeader?.id;
+		if (!ancestorId || seen.has(ancestorId)) break;
+		seen.add(ancestorId);
+		if (live.has(ancestorId)) break;
+		ancestors.push(ancestorId);
+		file = parentFile;
+	}
+	return ancestors;
+}
+
+/** The session's .jsonl file, when Pi can say it (a stale ctx says nothing). */
+function sessionFileOf(ctx: ExtensionContext): string | undefined {
+	try {
+		return ctx.sessionManager.getSessionFile() ?? undefined;
+	} catch {
+		return undefined;
+	}
+}
 
 /** `defaultActive: false`, spread in: the Pi floor's types (0.79.1) do not declare it. */
 const NOT_ACTIVE_ON_REGISTRATION = { defaultActive: false } as const;
@@ -275,6 +379,7 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 		...NOT_ACTIVE_ON_REGISTRATION,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			wake?.touch();
+			for (const ancestor of ancestorWakes) ancestor.touch();
 			const result = await connection.callTool(params, { sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd, wakes: wake !== null });
 			if (result.isError) throw new Error(result.text);
 			return { content: [{ type: "text", text: result.text }], details: {} };
@@ -283,6 +388,8 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 
 	let ctx: ExtensionContext | null = null;
 	let wake: InboxWake | null = null;
+	/** Wakes for the handed-off ancestors (#3539): their replies land in this session too. */
+	let ancestorWakes: InboxWake[] = [];
 	/** The on-disk version the session was last told about (#2085's message, once per version). */
 	let notifiedOnDisk: string | null = null;
 	let activationSettled = false;
@@ -313,8 +420,19 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 		}
 	};
 
-	/** Put the wake text into the session and wait until Pi starts it as a user message. */
-	const send = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
+	/**
+	 * Put the wake text into the session and wait until Pi starts it as a user message.
+	 * Queued behind the send in flight: the main wake and the handed-off ancestors' wakes share
+	 * this one `waiting` slot (#3539), so a second delivery waits for the first to settle instead
+	 * of overwriting it (whose promise would then never resolve).
+	 */
+	let sendQueue: Promise<void> = Promise.resolve();
+	const send = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer"): Promise<void> => {
+		const run = sendQueue.then(() => sendNow(text, command, deliverAs));
+		sendQueue = run.catch(() => undefined);
+		return run;
+	};
+	const sendNow = (text: string, command: InboxReplyCommand, deliverAs: "followUp" | "steer") =>
 		new Promise<void>((resolve, reject) => {
 			const current = ctx;
 			const watchdog = () => {
@@ -420,10 +538,20 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 		if (wake && wake.sessionId !== sessionId) {
 			wake.dispose();
 			wake = null;
+			for (const ancestor of ancestorWakes) ancestor.dispose();
+			ancestorWakes = [];
 		}
 		if (!wake && startCtx.hasUI) {
 			wake = new InboxWake(connection, sessionId, target);
 			wake.start();
+			// A session handed its work to this one (#3539): its replies still wait on the session
+			// it left, which polls no more. Wake for the ancestors no live Pi claims, nearest
+			// first, so their replies land here too; a predecessor still running keeps its own.
+			ancestorWakes = resolveHandoffAncestors({ sessionId, sessionFile: sessionFileOf(startCtx), dataDir: connection.dataDir }).map((ancestorId) => {
+				const ancestorWake = new InboxWake(connection, ancestorId, target);
+				ancestorWake.start();
+				return ancestorWake;
+			});
 		}
 	});
 
@@ -466,6 +594,8 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 	pi.on("session_shutdown", () => {
 		wake?.dispose();
 		wake = null;
+		for (const ancestor of ancestorWakes) ancestor.dispose();
+		ancestorWakes = [];
 		ctx = null;
 		endWaiting(new Error("the session ended"));
 	});
@@ -473,7 +603,11 @@ function registerPiInbox(pi: InboxPi, connection: InboxAgentConnection, options:
 	// The person submitted something: their turn goes first, and replies follow them to this process.
 	pi.on("input", (event) => {
 		wake?.onForeignPrompt();
-		if (event?.source !== "extension") wake?.touch();
+		for (const ancestor of ancestorWakes) ancestor.onForeignPrompt();
+		if (event?.source !== "extension") {
+			wake?.touch();
+			for (const ancestor of ancestorWakes) ancestor.touch();
+		}
 	});
 	pi.on("agent_start", () => {
 		runOpen = true;
