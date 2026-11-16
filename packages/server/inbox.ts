@@ -203,7 +203,7 @@ import { openBrowser } from "./browser";
 import { isAddressInUseError } from "./remote";
 import { createRequestHostGuard } from "./request-host-guard";
 import { markPlannotatorResponse, withPlannotatorServerHeader } from "./plannotator-server-marker";
-import { createInboxMcpServer, INBOX_BOARD_OFF_TEXT, INBOX_STEPS_OFF_TEXT, type InboxMcpContext } from "./inbox-mcp";
+import { createInboxMcpServer, INBOX_BOARD_OFF_TEXT, INBOX_STEPS_OFF_TEXT, resolveInboxMcpPromptText, type InboxMcpContext } from "./inbox-mcp";
 import { guidePullKey, inboxGuideFileContents, inboxGuideRoute, readInboxReviewSnapshot } from "./inbox-guides";
 import { createInboxRepoCache } from "./inbox-repos";
 import { createGitlabHosts, unnamedForgeHost, type GitlabHosts } from "./inbox-gitlab-hosts";
@@ -1633,6 +1633,8 @@ export async function startInboxServer(options: InboxServerOptions = {}): Promis
     broOn: () => broOn(),
     // Code review: submit_guide's `review` field is listed and served only while the person has it on.
     codeReviewOn: () => codeReviewOn(),
+    // The person's own Inbox texts reach MCP-connected sessions too (#3555): read on every server construction.
+    inboxPromptText: () => resolveInboxMcpPromptText(loadConfig()),
     walkthroughThread: (threadId) => pullOwners.started().get(threadId)?.kind === "walkthrough",
     // Shape: get_guide_brief names the overview's drawing only while Code review and Shape are both on.
     shapeOn: () => shapeOn(),

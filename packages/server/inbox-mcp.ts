@@ -24,7 +24,7 @@ import { questionsToCheckText } from "@plannotator/shared/inbox/questions-to-che
 import { INBOX_ACTION_EXAMPLE, INBOX_ACTION_GUIDE, INBOX_DONE_DESCRIPTION } from "@plannotator/core/inbox-actions";
 import { INBOX_NOTE_BLOCK_LINE } from "@plannotator/core/inbox-review";
 import { antigravityConversationOfCall, checkInboxSubject, INBOX_ANTIGRAVITY_HOST, INBOX_CARD_ACTION_ON, INBOX_MCP_WAKING_HOSTS, INBOX_T3_HOST, inboxTidyMcpLine, isInboxCombineRun, INBOX_NAME_THIS_THREAD_HINT, INBOX_SECTIONS, isInboxNote, INBOX_THREAD_NAME_MAX, type InboxGuideRef, type InboxSectionId, type InboxMessage, type InboxProject } from "@plannotator/core/inbox-types";
-import { inboxBodyWithBro, inboxStopNoticeReply, INBOX_AGENT_RULES, INBOX_OPTION_LINES_RULE, INBOX_ATTACHMENTS_PICTURES_LINE, INBOX_ASK_RECOGNISE_RULE, INBOX_ATTACHMENTS_PROTOTYPE_CLAUSE, INBOX_DELEGATED_OPTIONS_RULE, INBOX_PEEK_META_KEY, INBOX_PICTURES_RULE, INBOX_REF_LINK_RULE, INBOX_REPLY_TO_CHECK, INBOX_REREAD_RULE, INBOX_SHOWING_RULE, INBOX_THREAD_NEW_ISSUE_RULE, INBOX_WAKES_META_KEY, INBOX_WORKING_FOLDER_META_KEY } from "@plannotator/shared/inbox/connection";
+import { inboxBodyWithBro, inboxReminderCustomText, inboxReminderRulesText, inboxStopNoticeReply, INBOX_AGENT_RULES, INBOX_OPTION_LINES_RULE, INBOX_ATTACHMENTS_PICTURES_LINE, INBOX_ASK_RECOGNISE_RULE, INBOX_ATTACHMENTS_PROTOTYPE_CLAUSE, INBOX_DELEGATED_OPTIONS_RULE, INBOX_PEEK_META_KEY, INBOX_PICTURES_RULE, INBOX_REF_LINK_RULE, INBOX_REPLY_TO_CHECK, INBOX_REREAD_RULE, INBOX_SHOWING_RULE, INBOX_THREAD_NEW_ISSUE_RULE, INBOX_WAKES_META_KEY, INBOX_WORKING_FOLDER_META_KEY } from "@plannotator/shared/inbox/connection";
 import { inboxSectionOf } from "@plannotator/shared/inbox/list";
 import { bodyShowsLocalImages, captureInboxInlineImages, type InlineImageFailure } from "@plannotator/shared/inbox/inline-images";
 import { inboxMessageRemoteImageRefsInOrder } from "@plannotator/shared/inbox/message-images";
@@ -101,6 +101,49 @@ export const INBOX_MCP_INSTRUCTIONS = [
   "",
   "A reply is the person's own: their words, then \"Answers to your questions\"; no tool answers or approves for them.",
 ].join("\n");
+
+/**
+ * Claude Code passes an MCP server's instructions to the model up to its first
+ * 2,048 characters (the cap the base instructions are budgeted against
+ * above), so the person's own Inbox texts (Settings → Prompts → Inbox, the
+ * shared slot) reach an MCP-connected session only when they fit in the room
+ * the base leaves. A longer text stays out entirely — the instructions stay
+ * the base text, as before — rather than arriving cut mid-sentence.
+ */
+export const INBOX_MCP_INSTRUCTIONS_MAX_CHARS = 2048;
+
+/**
+ * The person's own Inbox texts for an MCP-connected session, from config.json
+ * (the shared `prompts.inbox` slot: the custom reminder, then the rules).
+ * Null when the person set neither: the instructions stay the base text.
+ * Takes the parsed config.json object (anything else reads as unset), like the
+ * terminal path's `resolveInboxReminderText` — the same texts, only the
+ * channel differs. The host is "-": the shared slot, as the Prompts page
+ * reads it (inbox-prompts.ts `reminderSlot`). The rules carry no lead here:
+ * the lead alone is longer than the room the base instructions leave, so it
+ * would keep every rules text out; a rules sentence inside the instructions
+ * block still reads as an instruction.
+ */
+export function resolveInboxMcpPromptText(config: unknown): string | null {
+  const reminder = inboxReminderCustomText(config, "-");
+  const rules = inboxReminderRulesText(config, "-");
+  if (reminder === null && rules === null) return null;
+  const parts: string[] = [];
+  if (reminder !== null) parts.push(reminder.trim());
+  if (rules !== null) parts.push(rules);
+  return parts.join("\n\n");
+}
+
+/**
+ * The server instructions with the person's own Inbox texts appended, when the
+ * whole fits under the cap; the base instructions unchanged otherwise. The
+ * base text is never cut.
+ */
+export function inboxMcpInstructions(extra: string | null | undefined): string {
+  if (typeof extra !== "string" || extra.trim() === "") return INBOX_MCP_INSTRUCTIONS;
+  const joined = `${INBOX_MCP_INSTRUCTIONS}\n\n${extra.trim()}`;
+  return joined.length <= INBOX_MCP_INSTRUCTIONS_MAX_CHARS ? joined : INBOX_MCP_INSTRUCTIONS;
+}
 
 /**
  * Claude Code passes an MCP description to the model up to its first 2,048
@@ -362,6 +405,13 @@ export interface InboxMcpContext extends InboxSnoozeMcpContext, InboxScheduledMc
    * Absent: off.
    */
   codeReviewOn?: () => boolean;
+  /**
+   * The person's own Inbox texts for an MCP-connected session (Settings →
+   * Prompts → Inbox, the shared slot; `resolveInboxMcpPromptText`), read on
+   * every server construction. Absent: the server instructions stay the base
+   * text, as before.
+   */
+  inboxPromptText?: () => string | null;
   /** The New review box started this thread as a walkthrough: every guide sent in it is one. */
   walkthroughThread?: (threadId: string) => boolean;
   /**
@@ -1183,7 +1233,7 @@ export function createInboxMcpServer(context: InboxMcpContext): McpServer {
   const clock = () => context.now?.() ?? Date.now();
   const server = new McpServer(
     { name: "plannotator-inbox", version: "1.0.0" },
-    { instructions: INBOX_MCP_INSTRUCTIONS, capabilities: { tools: {} } },
+    { instructions: inboxMcpInstructions(context.inboxPromptText?.() ?? null), capabilities: { tools: {} } },
   );
   // Every tool's result carries a Tidy waiting on an agent no connection wakes (MCP only), once, at its end.
   const register = server.registerTool.bind(server) as (name: string, config: unknown, handler: (input: never, ctx: unknown) => Promise<ToolResult>) => unknown;
